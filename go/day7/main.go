@@ -69,7 +69,7 @@ type Hand struct {
 	handType    HandType
 }
 
-func cardRank(c byte) int {
+func cardRank(c byte, joker bool) int {
 	switch c {
 	case 'A':
 		return 14
@@ -78,6 +78,9 @@ func cardRank(c byte) int {
 	case 'Q':
 		return 12
 	case 'J':
+        if joker {
+            return 1
+        }
 		return 11
 	case 'T':
 		return 10
@@ -86,12 +89,18 @@ func cardRank(c byte) int {
 	}
 }
 
-func handType(h Hand) HandType {
-	switch len(h.countByCard) {
+func handType(h Hand, joker bool) HandType {
+    var countByCard map[byte]int
+    if joker {
+        countByCard = jokerize(h.countByCard)
+    } else {
+        countByCard = h.countByCard
+    }
+	switch len(countByCard) {
 	case 1:
 		return fiveOfAKind
 	case 2:
-		for _, count := range h.countByCard {
+		for _, count := range countByCard {
 			if count == 2 || count == 3 {
 				return fullHouse
 			}
@@ -101,7 +110,7 @@ func handType(h Hand) HandType {
 		}
 		panic("should not happen")
 	case 3:
-		for _, count := range h.countByCard {
+		for _, count := range countByCard {
 			if count == 3 {
 				return threeOfAKind
 			}
@@ -118,7 +127,7 @@ func handType(h Hand) HandType {
 	panic("should not happen")
 }
 
-func handfromString(s string) Hand {
+func handfromString(s string, joker bool) Hand {
 	// s is 5 chars of cards, 1 space, 1 or more digits for bid
 	h := Hand{
 		countByCard: make(map[byte]int),
@@ -131,18 +140,18 @@ func handfromString(s string) Hand {
 	for i := 6; i < len(s); i++ {
 		h.bid = h.bid*10 + int(s[i]-'0')
 	}
-	h.handType = handType(h)
+	h.handType = handType(h, joker)
 	return h
 }
 
-func compareHands(h1, h2 Hand) bool {
+func compareHands(h1, h2 Hand, joker bool) bool {
 	// return true if h1 is lower ranked than h2
 	if h1.handType != h2.handType {
 		return h1.handType < h2.handType
 	}
 	for i := 0; i < 5; i++ {
 		if h1.cards[i] != h2.cards[i] {
-			return cardRank(h1.cards[i]) < cardRank(h2.cards[i])
+			return cardRank(h1.cards[i], joker) < cardRank(h2.cards[i], joker)
 		}
 	}
 	panic("should not happen")
@@ -151,11 +160,11 @@ func compareHands(h1, h2 Hand) bool {
 func answer1() int {
 	var hands []Hand
 	for _, line := range readInput() {
-		hands = append(hands, handfromString(line))
+		hands = append(hands, handfromString(line, false))
 	}
 	// sort hands from lowest to highest
 	sort.Slice(hands, func(i int, j int) bool {
-		return compareHands(hands[i], hands[j])
+		return compareHands(hands[i], hands[j], false)
 	})
 	rank := 1
 	sum := 0
@@ -175,101 +184,32 @@ func answer1() int {
 // A K Q J T 9 8 7 6 5 4 3 2 J
 // Recalculate the ranking of all hands and the sum of the products of rank and bid.
 
-func cardRankPart2(c byte) int {
-	switch c {
-	case 'J':
-		return 1
-	default:
-		return cardRank(c)
-	}
-}
-
-func handTypePart2(h Hand) HandType {
-	jokers := h.countByCard['J']
-	if jokers == 0 {
-		return handType(h)
-	}
-	if jokers == 4 || jokers == 5 {
-		return fiveOfAKind
-	}
-	if jokers == 3 {
-		if len(h.countByCard) == 2 {
-			return fiveOfAKind
-		}
-		return fourOfAKind
-	}
-	if jokers == 2 {
-		if len(h.countByCard) == 2 {
-			return fiveOfAKind
-		}
-		if len(h.countByCard) == 3 {
-			return fourOfAKind
-		}
-		return threeOfAKind
-	}
-	if jokers == 1 {
-		if len(h.countByCard) == 2 {
-			return fiveOfAKind
-		}
-		if len(h.countByCard) == 3 {
-			// if the other 2 cards have count 2, it's a full house
-			// if one has count 1 ans the other 3, it's a four of a kind
-			for card, count := range h.countByCard {
-				if card == 'J' {
-					continue
-				}
-				if count == 2 {
-					return fullHouse
-				}
-				return fourOfAKind
-			}
-		}
-		if len(h.countByCard) == 4 {
-			return threeOfAKind
-		}
-		return onePair
-	}
-	panic("should not happen")
-}
-
-func handfromStringPart2(s string) Hand {
-	// s is 5 chars of cards, 1 space, 1 or more digits for bid
-	h := Hand{
-		countByCard: make(map[byte]int),
-	}
-	for i := 0; i < 5; i++ {
-		h.cards[i] = s[i]
-		h.countByCard[s[i]]++
-	}
-	h.bid = 0
-	for i := 6; i < len(s); i++ {
-		h.bid = h.bid*10 + int(s[i]-'0')
-	}
-	h.handType = handTypePart2(h)
-	return h
-}
-
-func compareHandsPart2(h1, h2 Hand) bool {
-	// return true if h1 is lower ranked than h2
-	if h1.handType != h2.handType {
-		return h1.handType < h2.handType
-	}
-	for i := 0; i < 5; i++ {
-		if h1.cards[i] != h2.cards[i] {
-			return cardRankPart2(h1.cards[i]) < cardRankPart2(h2.cards[i])
-		}
-	}
-	panic("should not happen")
+func jokerize(countByCard map[byte]int) map[byte]int {
+    // we turn the jokers into the card with the highest count
+    newCountByCard := make(map[byte]int)
+    var maxCountCard byte
+    maxCount := 0
+    for card, count := range countByCard {
+        if card != 'J' {
+            newCountByCard[card] = count
+            if count > maxCount {
+                maxCount = count
+                maxCountCard = card
+            }
+        }
+    }
+    newCountByCard[maxCountCard] += countByCard['J']
+    return newCountByCard
 }
 
 func answer2() int {
 	var hands []Hand
 	for _, line := range readInput() {
-		hands = append(hands, handfromStringPart2(line))
+		hands = append(hands, handfromString(line, true))
 	}
 	// sort hands from lowest to highest
 	sort.Slice(hands, func(i int, j int) bool {
-		return compareHandsPart2(hands[i], hands[j])
+		return compareHands(hands[i], hands[j], true)
 	})
 	rank := 1
 	sum := 0
