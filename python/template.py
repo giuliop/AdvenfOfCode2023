@@ -4,8 +4,10 @@ import sys
 # PART 1
 
 def read_input_into_lines():
+    """Read the input file and return it as a list of lines stripped of
+       leading or trailing whitespace."""
     with open('../input/XXX', 'r', encoding='utf-8') as file:
-        return file.readlines()
+        return [line.strip() for line in file.readlines()]
 
 CORRECT_ANSWER_1 = None
 def answer_1():
