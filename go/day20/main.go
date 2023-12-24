@@ -1,0 +1,657 @@
+package main
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log"
+	"os"
+	"sort"
+	"strings"
+)
+
+// PART 1
+
+// You have a communication system made of modules that sends and receives
+// either high or low pulses. The modules are connected to each other as
+// described in the input file, a list of lines like these:
+
+// broadcaster -> a, b, c
+// %a -> b
+// %b -> c
+// %c -> inv
+// &inv -> a
+
+// On the left you have an optional % or & sign, followed by the name of the
+// module. On the right you have the modules that receive the signal from the
+// module on the left.
+
+// There are three types of modules:
+
+// - broadcaster: there is a single broadcaster module in the system that sends
+//				  the same pulse it receives to all the modules connected to it
+
+// - %: flip-flop modules, can be either on or off (initially off), and when
+//		they receive a high pulse nothing happen, but when they receive a low
+//		pulse they change state and send a high pulse turning on or a low pulse
+//		turning off
+
+// - &: conjunction modules, they remember the most recent pulse they received
+//		from all their inputs (starting from low if they haven't received any),
+//		when a new input is received they update their memory for that input,
+//		if they remember high pulses for all inputs, send a low pulse,
+//		otherwise, it sends a high pulse
+
+// THere is a start button, when pressed a single low pulse is sent to the
+// broadcaster module. Then all pulses are processed in the order they are sent.
+
+// Calculate the product of high pulses and low pulses sent if you press the
+// start button 1000 times (including the pulses sent by the start button).
+
+func readInput() []string {
+	file, err := os.Open("../../input/20")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	var lines []string
+
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	return lines
+}
+
+type Module interface {
+	receive(Pulse, string)
+	addOutput(Module)
+}
+
+type Broadcaster struct {
+	name    string
+	outputs []Module
+	system  *System
+}
+
+func (b *Broadcaster) receive(p Pulse, sender string) {
+	//fmt.Printf("Received: %s <- %s: %s\n", b.name, sender, p)
+	b.system.send(p, b.name, b.outputs)
+}
+
+func (b *Broadcaster) addOutput(m Module) {
+	b.outputs = append(b.outputs, m)
+}
+
+type FlipFlop struct {
+	name    string
+	outputs []Module
+	state   bool // false = off, true = on
+	system  *System
+}
+
+func (f *FlipFlop) receive(p Pulse, sender string) {
+	//fmt.Printf("Received: %s <- %s: %s\n", f.name, sender, p)
+	if p == low {
+		f.state = !f.state
+		pulseToSend := low
+		if f.state {
+			pulseToSend = high
+		}
+		f.system.send(pulseToSend, f.name, f.outputs)
+	} else {
+		f.system.send(empty, f.name, f.outputs)
+	}
+}
+
+func (f *FlipFlop) addOutput(m Module) {
+	f.outputs = append(f.outputs, m)
+}
+
+type Conjunction struct {
+	name    string
+	outputs []Module
+	state   map[string]Pulse // input name -> last pulse
+	system  *System
+}
+
+func (c *Conjunction) receive(p Pulse, sender string) {
+	//fmt.Printf("Received: %s <- %s: %s\n", c.name, sender, p)
+	c.state[sender] = p
+	pulseToSend := low
+	for _, state := range c.state {
+		if state == low {
+			pulseToSend = high
+			break
+		}
+	}
+	c.system.send(pulseToSend, c.name, c.outputs)
+}
+
+func (c *Conjunction) addOutput(m Module) {
+	c.outputs = append(c.outputs, m)
+}
+
+// output module that has no outputs
+type Output struct {
+	name    string
+	outputs []Module
+	system  *System
+}
+
+func (o *Output) receive(p Pulse, sender string) {
+}
+
+func (o *Output) addOutput(m Module) {
+}
+
+type Pulse int
+
+const (
+	empty Pulse = iota
+	low
+	high
+)
+
+func (p Pulse) String() string {
+	switch p {
+	case empty:
+		return "empty"
+	case low:
+		return "low"
+	case high:
+		return "high"
+	}
+	return "Unknown pulse"
+}
+
+type StateData struct {
+	lowPulses  int // count of low pulses sent
+	highPulses int // count of high pulses sent
+}
+
+type message struct {
+	pulse      Pulse
+	senderName string
+	receiver   Module
+	last       bool
+}
+
+type System struct {
+	modules      map[string]Module
+	_moduleNames map[Module]string // for debugging
+	moduleList   []Module          // list of modules to keep order when taking snapshots
+	sendChannel  chan message      // channel to send pulses to modules
+	snapshots    map[string]int    // state hash -> state count
+	stateData    map[int]StateData // state count -> state data
+	cycleStart   int               // count of start button presses to get to the start of the cycle
+	cycleLength  int               // count of start button presses to get back to cycle first state
+	output       Module            // for part 2, the final output module
+}
+
+func (s *System) pressStart() (lowPulses, highPulses int, out []Pulse) {
+	// send a low pulse to the broadcaster and return the number of total low and
+	// high pulses generated by the system and the pulses sent out by the output.
+	// If output is nil, out is an empty slice.
+	s.send(low, "start", []Module{s.modules["broadcaster"]})
+	lowPulses, highPulses = 0, 0
+	messagesToSend := []message{}
+	modulesToWait := 1
+	for m := range s.sendChannel {
+		//fmt.Printf("%s -> %s: %s, last:%v\n", m.senderName, s._moduleNames[m.receiver], m.pulse, m.last)
+		if m.pulse == low {
+			lowPulses++
+		} else if m.pulse == high {
+			highPulses++
+		}
+		if m.pulse != empty {
+			messagesToSend = append(messagesToSend, m)
+			if s.output != nil && m.senderName == s._moduleNames[s.output] {
+				out = append(out, m.pulse)
+			}
+		}
+		if m.last {
+			modulesToWait--
+			if modulesToWait == 0 {
+				if len(messagesToSend) == 0 {
+					return lowPulses, highPulses, out
+				}
+				modulesWithNoOutputs := 0
+				for _, m := range messagesToSend {
+					if _, ok := m.receiver.(*Output); ok {
+						modulesWithNoOutputs++
+						continue
+					}
+					m.receiver.receive(m.pulse, m.senderName)
+				}
+				modulesToWait = len(messagesToSend) - modulesWithNoOutputs
+				if modulesToWait == 0 {
+					return lowPulses, highPulses, out
+				}
+				messagesToSend = []message{}
+			}
+		}
+	}
+	panic("?")
+}
+
+func (s *System) send(p Pulse, sender string, receivers []Module) {
+	// send pulse p to all modules connected to sender
+	if len(receivers) == 0 {
+		return
+	}
+	last := len(receivers) - 1
+	for _, r := range receivers[:last] {
+		s.sendChannel <- message{pulse: p, senderName: sender,
+			receiver: r, last: false}
+	}
+	s.sendChannel <- message{pulse: p, senderName: sender,
+		receiver: receivers[last], last: true}
+}
+
+func parseInputLine(s string) (moduleType byte, name string, outputs []string) {
+	split := strings.Split(s, " -> ")
+	left, right := split[0], split[1]
+	if left[0] == '%' || left[0] == '&' {
+		moduleType = left[0]
+		name = left[1:]
+	} else {
+		moduleType = 'b'
+		name = left
+	}
+	outputs = strings.Split(right, ", ")
+	return moduleType, name, outputs
+}
+
+func (s *System) addModule(moduleType byte, name string) Module {
+
+	outputs := make([]Module, 0)
+	switch moduleType {
+	case 'b':
+		return &Broadcaster{name: name, outputs: outputs, system: s}
+	case '%':
+		return &FlipFlop{name: name, outputs: outputs, state: false, system: s}
+	case '&':
+		return &Conjunction{name: name, outputs: outputs,
+			state: make(map[string]Pulse), system: s}
+	case 'o':
+		return &Output{name: name, outputs: outputs, system: s}
+	default:
+		panic(fmt.Sprintf("Unknown module type %c", moduleType))
+	}
+}
+
+func hashData(data []byte) string {
+	hasher := sha256.New()
+	hasher.Write(data)
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func (s *System) createStateId() string {
+	stateBytes := make([]byte, 0)
+	for _, module := range s.moduleList {
+		switch m := module.(type) {
+		case *FlipFlop:
+			state := 0
+			if m.state {
+				state = 1
+			}
+			stateBytes = append(stateBytes, byte(state))
+		case *Conjunction:
+			keys := make([]string, 0)
+			for k := range m.state {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+
+			for _, k := range keys {
+				stateBytes = append(stateBytes, byte(m.state[k]))
+			}
+		}
+	}
+	return hashData(stateBytes)
+}
+
+func initSystem() *System {
+	s := System{
+		modules:      make(map[string]Module),
+		_moduleNames: make(map[Module]string),
+		moduleList:   make([]Module, 0),
+		sendChannel:  make(chan message, 1000),
+		snapshots:    make(map[string]int),
+		stateData:    make(map[int]StateData),
+	}
+	input_lines := readInput()
+	for _, line := range input_lines {
+		moduleType, name, _ := parseInputLine(line)
+		s.modules[name] = s.addModule(moduleType, name)
+		s._moduleNames[s.modules[name]] = name
+		s.moduleList = append(s.moduleList, s.modules[name])
+	}
+	for _, line := range input_lines {
+		_, name, outputNames := parseInputLine(line)
+		for _, outputName := range outputNames {
+			if _, ok := s.modules[outputName]; !ok {
+				s.modules[outputName] = s.addModule('o', outputName)
+				s._moduleNames[s.modules[outputName]] = outputName
+			}
+			outputModule := s.modules[outputName]
+			s.modules[name].addOutput(outputModule)
+			// if the output module is a conjunction, initialize its senders state
+			if c, ok := outputModule.(*Conjunction); ok {
+				c.state[name] = low
+			}
+		}
+	}
+	stateId := s.createStateId()
+	s.snapshots[stateId] = 0
+	s.stateData[0] = StateData{lowPulses: 0, highPulses: 0}
+	return &s
+}
+
+func (s *System) calculatePulses(presses int) int {
+	// calculate the number of high pulses and low pulses sent by the system
+	// after 1000 start button presses
+	low, high := 0, 0
+	if s.cycleLength == 0 {
+		for i := 0; i <= presses; i++ {
+			low += s.stateData[i].lowPulses
+			high += s.stateData[i].highPulses
+		}
+		return low * high
+	}
+
+	for i := 0; i < s.cycleStart; i++ {
+		low += s.stateData[i].lowPulses
+		high += s.stateData[i].highPulses
+	}
+	cycleLow, cycleHigh := 0, 0
+	for i := s.cycleStart; i < s.cycleStart+s.cycleLength+1; i++ {
+		cycleLow += s.stateData[i].lowPulses
+		cycleHigh += s.stateData[i].highPulses
+	}
+	low += (presses - s.cycleStart) / s.cycleLength * cycleLow
+	high += (presses - s.cycleStart) / s.cycleLength * cycleHigh
+
+	for i := s.cycleStart; i < s.cycleStart+(presses-s.cycleStart)%s.cycleLength; i++ {
+		low += s.stateData[i].lowPulses
+		high += s.stateData[i].highPulses
+	}
+	return low * high
+}
+
+func answer1() int {
+	presses := 1000
+	s := initSystem()
+	for i := 0; i < presses; i++ {
+		low, high, _ := s.pressStart()
+		stateId := s.createStateId()
+		stateCount := i + 1
+		stateData := StateData{lowPulses: low, highPulses: high}
+		s.stateData[stateCount] = stateData
+		if count, ok := s.snapshots[stateId]; ok {
+			s.cycleStart = count
+			s.cycleLength = stateCount - s.cycleStart
+			break
+		}
+		s.snapshots[stateId] = stateCount
+	}
+	return s.calculatePulses(presses)
+}
+
+// -----------------------------------------------------------------------
+
+// PART 2
+
+// One of the modules is named 'rx'. What is the lowest number of start button
+// presses that will generate a single low pulse to the 'rx' module?
+
+func getOutpus(module Module) []Module {
+	var outputs []Module
+	if b, ok := module.(*Broadcaster); ok {
+		outputs = b.outputs
+	} else if f, ok := module.(*FlipFlop); ok {
+		outputs = f.outputs
+	} else if c, ok := module.(*Conjunction); ok {
+		outputs = c.outputs
+	}
+	return outputs
+}
+
+func (s *System) getInputs(module Module) (modules []Module, names []string) {
+	for _, m := range s.moduleList {
+		for _, output := range getOutpus(m) {
+			if output == module {
+				modules = append(modules, m)
+				names = append(names, s._moduleNames[m])
+			}
+		}
+	}
+	return modules, names
+}
+
+func (s *System) getSubSytemModules(module Module) map[Module]bool {
+	// return a set (bool map) of all modules connected to module, including module
+	visited := make(map[Module]bool)
+	frontier := []Module{module}
+	for len(frontier) > 0 {
+		module = frontier[0]
+		frontier = frontier[1:]
+		if visited[module] {
+			continue
+		}
+		visited[module] = true
+		inputs, _ := s.getInputs(module)
+		frontier = append(frontier, inputs...)
+	}
+	return visited
+}
+
+func (s *System) areIndipendentSubsystems(modules []Module) bool {
+	// return true if the modules are indipendent subsystems
+	if len(modules) == 0 {
+		return true
+	}
+	moduleSet := s.getSubSytemModules(modules[0])
+	for _, module := range modules[1:] {
+		for subModule := range s.getSubSytemModules(module) {
+			if moduleSet[subModule] && s._moduleNames[subModule] != "broadcaster" {
+				println(s._moduleNames[subModule])
+				return false
+			}
+			moduleSet[subModule] = true
+		}
+	}
+	return true
+}
+
+func pruneOutputsAndFixSystem(s *System, m *Module, modules map[Module]bool) {
+	// remove all outputs that are not in modules and change the system field of
+	// the modules to s
+	outputs := make([]Module, 0)
+	for _, output := range getOutpus(*m) {
+		if modules[output] {
+			outputs = append(outputs, output)
+		}
+	}
+	switch module := (*m).(type) {
+	case *Broadcaster:
+		module.outputs = outputs
+		module.system = s
+	case *FlipFlop:
+		module.outputs = outputs
+		module.system = s
+	case *Conjunction:
+		module.outputs = outputs
+		module.system = s
+	}
+}
+
+func initSubStem(output string) *System {
+	s := initSystem()
+	// initialize and return a subsystem with module as final output
+	out := s.modules[output]
+	subSystem := System{
+		modules:      make(map[string]Module),
+		_moduleNames: make(map[Module]string),
+		moduleList:   make([]Module, 0),
+		sendChannel:  make(chan message, 1000),
+		snapshots:    make(map[string]int),
+		stateData:    make(map[int]StateData),
+		output:       out,
+	}
+	endpoint := &Output{name: "END", outputs: []Module{}, system: &subSystem}
+	out.addOutput(endpoint)
+	s._moduleNames[endpoint] = "END"
+	modules := s.getSubSytemModules(endpoint)
+	for m := range modules {
+		name := s._moduleNames[m]
+		subSystem.modules[name] = m
+		subSystem._moduleNames[m] = name
+		subSystem.moduleList = append(subSystem.moduleList, m)
+		pruneOutputsAndFixSystem(&subSystem, &m, modules)
+	}
+	stateId := subSystem.createStateId()
+	subSystem.snapshots[stateId] = 0
+	subSystem.stateData[0] = StateData{lowPulses: 0, highPulses: 0}
+	return &subSystem
+}
+
+// GCD (Greatest Common Divisor) using Euclidean algorithm
+func GCD(a, b int) int {
+	for b != 0 {
+		t := b
+		b = a % b
+		a = t
+	}
+	return a
+}
+
+// LCM (Least Common Multiple) of two numbers is their product divided by their GCD
+func LCM(a, b int) int {
+	return a * b / GCD(a, b)
+}
+
+// LCM of multiple numbers
+func LCMn(nums []int) int {
+	var lcmResult int = nums[0]
+	for _, num := range nums[1:] {
+		lcmResult = LCM(lcmResult, num)
+	}
+	return lcmResult
+}
+
+func answer2() int {
+	s := initSystem()
+	name := "rx"
+	module := s.modules[name]
+	inputModules, inputNames := s.getInputs(module)
+	fmt.Printf("Inputs of %s: %v\n", name, inputNames)
+	// Inputs of rx: [sq]
+	// sq is a conjuction and we need sq to send a low pulse to rx
+
+	name = "sq"
+	inputModules, inputNames = s.getInputs(inputModules[0])
+	fmt.Printf("Inputs of %s: %v\n", name, inputNames)
+	// Inputs of sq: [fv kk vt xr]
+	// These are four conjuctions, we need them all to send a hight pulse to sq
+	// lets's check if the four subsystems are independent
+	println("Are subsystems independent?", s.areIndipendentSubsystems(inputModules), "\n")
+	// true
+
+	// We can then analyze the four subsystems independently.
+	// For each let's see what they output after each press and if there are
+	// cycles in the output.
+	type Data struct {
+		output      map[int][]Pulse
+		cycleStart  int
+		cycleLength int
+	}
+
+	data := make(map[string]Data)
+	for _, name := range inputNames {
+		subsystem := initSubStem(name)
+		outputByPresses := make(map[int][]Pulse)
+		for i := 0; i < 10000; i++ {
+			stateCount := i + 1
+			_, _, out := subsystem.pressStart()
+			// if out contains a high pulse at any index, record it
+			for _, pulse := range out {
+				if pulse == high {
+					outputByPresses[stateCount] = out
+					break
+				}
+			}
+			stateId := subsystem.createStateId()
+			if count, ok := subsystem.snapshots[stateId]; ok {
+				subsystem.cycleStart = count
+				subsystem.cycleLength = stateCount - subsystem.cycleStart
+				break
+			}
+			subsystem.snapshots[stateId] = stateCount
+		}
+		data[name] = Data{output: outputByPresses, cycleStart: subsystem.cycleStart, cycleLength: subsystem.cycleLength}
+	}
+	for name, d := range data {
+		fmt.Printf("%s:\n", name)
+		fmt.Printf("cycleStart: %d, cycleLength: %d\n", d.cycleStart, d.cycleLength)
+		for i := range d.output {
+			fmt.Printf("%d: %v\n", i, d.output[i])
+		}
+		println()
+	}
+	//fv:
+	//cycleStart: 1, cycleLength: 3863
+	//3863: [high low low low low low low low low]
+
+	//kk:
+	//cycleStart: 1, cycleLength: 3931
+	//3931: [high low low low low low low low low low]
+
+	//vt:
+	//cycleStart: 1, cycleLength: 3797
+	//3797: [high low low low low low low low low]
+
+	//xr:
+	//cycleStart: 1, cycleLength: 3769
+	//3769: [high low low low low low low low low]
+
+	return LCMn([]int{3863, 3931, 3797, 3769})
+}
+
+// -----------------------------------------------------------------------
+
+var correctAnswers = map[int]int{
+	1: 867118762,
+	2: 217317393039529,
+}
+
+var answerFuncs = map[int]func() int{
+	1: answer1,
+	2: answer2,
+}
+
+func printAndTest(question int) {
+	answer := answerFuncs[question]()
+	correctAnswer, ok := correctAnswers[question]
+	if ok && answer != correctAnswer {
+		log.Fatal("Wrong answer, expected ", correctAnswer, " got ", answer)
+	}
+	println(answer)
+}
+
+func main() {
+	// if no argument, run all answers, otherwise only part 1 or 2
+	if len(os.Args) == 1 || os.Args[1] == "1" {
+		printAndTest(1)
+	}
+	if len(os.Args) == 1 || os.Args[1] == "2" {
+		printAndTest(2)
+	}
+	if len(os.Args) > 1 && os.Args[1] != "1" && os.Args[1] != "2" {
+		println("Give 1 or 2 as argument, or no argument at all")
+	}
+}
