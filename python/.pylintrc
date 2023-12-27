@@ -1,2 +1,6 @@
 [MESSAGES CONTROL]
-disable=C0111  # disable warning for missing function/method docstring
+# disable warning for missing function/method docstring
+disable=C0111
+# disable warning for too few public methods
+disable=R0903
+
